@@ -32,6 +32,11 @@ var stopRU = map[string]struct{}{
 	"этот": {}, "при": {}, "об": {}, "про": {}, "всё": {}, "нас": {},
 }
 
+type TokenWithPos struct {
+	Term     string
+	Position uint32
+}
+
 // Analyzer токенизирует, удаляет стоп-слова и стеммирует текст
 type Analyzer struct {
 	lang string // "english" | "russian"
@@ -64,6 +69,25 @@ func (a *Analyzer) Analyze(text string) []string {
 	return out
 }
 
+func (a *Analyzer) AnalyzeWithPositions(text string) []TokenWithPos {
+	tokens := tokenize(text)
+	out := make([]TokenWithPos, 0, len(tokens))
+	var pos uint32
+	for _, tok := range tokens {
+		lower := strings.ToLower(tok)
+		if len(lower) < 2 || a.isStop(lower) {
+			pos++ // позицию увеличиваем, но токен не сохраняем
+			continue
+		}
+		stemmed, err := snowball.Stem(lower, a.lang, true)
+		if err != nil || len(stemmed) == 0 {
+			stemmed = lower
+		}
+		out = append(out, TokenWithPos{Term: stemmed, Position: pos})
+		pos++
+	}
+	return out
+}
 func (a *Analyzer) isStop(w string) bool {
 	if a.lang == "russian" {
 		_, ok := stopRU[w]
@@ -75,6 +99,6 @@ func (a *Analyzer) isStop(w string) bool {
 
 func tokenize(text string) []string {
 	return strings.FieldsFunc(text, func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '-'
 	})
 }

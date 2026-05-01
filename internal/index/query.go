@@ -11,16 +11,19 @@ type TermExpr struct{ Word string }
 type AndExpr struct{ Left, Right Expr }
 type OrExpr struct{ Left, Right Expr }
 type NotExpr struct{ Operand Expr }
+type PhraseExpr struct{ Words []string }
 
-func (TermExpr) exprNode() {}
-func (AndExpr) exprNode()  {}
-func (OrExpr) exprNode()   {}
-func (NotExpr) exprNode()  {}
+func (TermExpr) exprNode()   {}
+func (AndExpr) exprNode()    {}
+func (OrExpr) exprNode()     {}
+func (NotExpr) exprNode()    {}
+func (PhraseExpr) exprNode() {}
 
-func Term(word string) Expr { return TermExpr{Word: word} }
-func And(l, r Expr) Expr    { return AndExpr{Left: l, Right: r} }
-func Or(l, r Expr) Expr     { return OrExpr{Left: l, Right: r} }
-func Not(operand Expr) Expr { return NotExpr{Operand: operand} }
+func Term(word string) Expr       { return TermExpr{Word: word} }
+func And(l, r Expr) Expr          { return AndExpr{Left: l, Right: r} }
+func Or(l, r Expr) Expr           { return OrExpr{Left: l, Right: r} }
+func Not(operand Expr) Expr       { return NotExpr{Operand: operand} }
+func Phrase(words ...string) Expr { return PhraseExpr{Words: words} }
 
 func evalExpr(idx *InvertedIndex, expr Expr) (*roaring.Bitmap, error) {
 	if expr == nil {
@@ -59,6 +62,13 @@ func evalExpr(idx *InvertedIndex, expr Expr) (*roaring.Bitmap, error) {
 		}
 		// NOT = universe \ operand
 		return roaring.AndNot(idx.AllDocs(), operand), nil
+	case PhraseExpr:
+		docIDs := idx.PhraseSearch(e.Words...)
+		bm := roaring.New()
+		for _, id := range docIDs {
+			bm.Add(id)
+		}
+		return bm, nil
 
 	default:
 		return nil, fmt.Errorf("unknown Expr type: %T", expr)
