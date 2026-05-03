@@ -41,11 +41,12 @@ type InvertedIndex struct {
 	tree     *lsm.Tree
 	analyzer *Analyzer
 
-	mu       sync.Mutex
-	allDocs  *roaring.Bitmap
-	tf       map[uint32]map[string]int // tf[docID][stemmedTerm] = count
-	df       map[string]int            // df[term] = число документов
-	champion map[string][]ScoredDoc
+	mu        sync.Mutex
+	allDocs   *roaring.Bitmap
+	tf        map[uint32]map[string]int // tf[docID][stemmedTerm] = count
+	df        map[string]int            // df[term] = число документов
+	tiers     []map[string][]ScoredDoc
+	tierSizes []int
 }
 
 func NewInvertedIndex(dir string, lang string) (*InvertedIndex, error) {
@@ -53,13 +54,19 @@ func NewInvertedIndex(dir string, lang string) (*InvertedIndex, error) {
 	if err != nil {
 		return nil, err
 	}
+	sizes := []int{100, 1000, 10000}
+	tiers := make([]map[string][]ScoredDoc, len(sizes))
+	for i := range tiers {
+		tiers[i] = make(map[string][]ScoredDoc)
+	}
 	return &InvertedIndex{
-		tree:     tree,
-		analyzer: NewAnalyzer(lang),
-		allDocs:  roaring.New(),
-		tf:       make(map[uint32]map[string]int),
-		df:       make(map[string]int),
-		champion: make(map[string][]ScoredDoc),
+		tree:      tree,
+		analyzer:  NewAnalyzer(lang),
+		allDocs:   roaring.New(),
+		tf:        make(map[uint32]map[string]int),
+		df:        make(map[string]int),
+		tiers:     tiers,
+		tierSizes: sizes,
 	}, nil
 }
 
@@ -202,7 +209,7 @@ func (idx *InvertedIndex) RankVSM(bm *roaring.Bitmap, queryTerms []string) []Sco
 		df := float64(idx.df[term])
 		idx.mu.Unlock()
 		if df > 0 {
-			queryVec[term] += 1 + math.Log(n/df)
+			queryVec[term] += math.Log(n / df)
 		}
 	}
 	var queryNorm float64
@@ -233,10 +240,10 @@ func (idx *InvertedIndex) RankVSM(bm *roaring.Bitmap, queryTerms []string) []Sco
 	return results
 }
 
-// BuildChampionLists строит top-r документов по TF-IDF для каждого термина
-func (idx *InvertedIndex) BuildChampionLists(r int) {
+func (idx *InvertedIndex) BuildTieredIndex() {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
+
 	for term := range idx.df {
 		n := float64(len(idx.tf))
 		df := float64(idx.df[term])
@@ -258,43 +265,71 @@ func (idx *InvertedIndex) BuildChampionLists(r int) {
 			tf := 1 + math.Log(float64(count))
 			entries = append(entries, entry{docID, tf * idf})
 		}
-		sort.Slice(entries, func(i, j int) bool { return entries[i].score > entries[j].score })
-		if len(entries) > r {
-			entries = entries[:r]
-		}
+		sort.Slice(entries, func(i, j int) bool {
+			return entries[i].score > entries[j].score
+		})
 
-		champ := make([]ScoredDoc, len(entries))
-		for i, e := range entries {
-			champ[i] = ScoredDoc{e.docID, e.score}
+		// заполняем каждый тир (нарастающим срезом)
+		for t, size := range idx.tierSizes {
+			end := size
+			if end > len(entries) {
+				end = len(entries)
+			}
+			champ := make([]ScoredDoc, end)
+			for i := 0; i < end; i++ {
+				champ[i] = ScoredDoc{entries[i].docID, entries[i].score}
+			}
+			idx.tiers[t][term] = champ
 		}
-		idx.champion[term] = champ
 	}
 }
 
-// ChampionSearch - inexact top-K через champion lists
-func (idx *InvertedIndex) ChampionSearch(k int, queryTerms ...string) []ScoredDoc {
+// overshoot -- множитель: ищем кандидатов >= K * overshoot перед скорингом
+func (idx *InvertedIndex) TieredSearch(k int, overshoot int, queryTerms ...string) []ScoredDoc {
 	stemmed := idx.stemAll(queryTerms)
+	if overshoot <= 0 {
+		overshoot = 5
+	}
 
-	candidates := make(map[uint32]float64)
+	for tierIdx := range idx.tiers {
+		candidates := make(map[uint32]struct{})
+		idx.mu.Lock()
+		for _, term := range stemmed {
+			for _, sd := range idx.tiers[tierIdx][term] {
+				candidates[sd.DocID] = struct{}{}
+			}
+		}
+		idx.mu.Unlock()
+
+		// условие остановки: кандидатов достаточно
+		if len(candidates) >= k*overshoot {
+			return idx.scoreAndSort(candidates, stemmed, k)
+		}
+	}
+
+	// все тиры исчерпаны -- скорим то, что есть
+	candidates := make(map[uint32]struct{})
 	idx.mu.Lock()
+	lastTier := idx.tiers[len(idx.tiers)-1]
 	for _, term := range stemmed {
-		for _, sd := range idx.champion[term] {
-			candidates[sd.DocID] += 0 // инициализируем без суммирования
+		for _, sd := range lastTier[term] {
+			candidates[sd.DocID] = struct{}{}
 		}
 	}
 	idx.mu.Unlock()
+	return idx.scoreAndSort(candidates, stemmed, k)
+}
 
+func (idx *InvertedIndex) scoreAndSort(candidates map[uint32]struct{}, stemmed []string, k int) []ScoredDoc {
+	results := make([]ScoredDoc, 0, len(candidates))
 	for docID := range candidates {
 		var score float64
 		for _, term := range stemmed {
 			score += idx.tfidf(docID, term)
 		}
-		candidates[docID] = score
-	}
-
-	results := make([]ScoredDoc, 0, len(candidates))
-	for docID, score := range candidates {
-		results = append(results, ScoredDoc{docID, score})
+		if score > 0 {
+			results = append(results, ScoredDoc{docID, score})
+		}
 	}
 	sort.Slice(results, func(i, j int) bool { return results[i].Score > results[j].Score })
 	if k > 0 && len(results) > k {

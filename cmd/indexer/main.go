@@ -77,9 +77,7 @@ func main() {
 	}
 	fmt.Printf("Indexed %d docs\n", len(corpus))
 
-	const R = 5
-	idx.BuildChampionLists(R)
-	fmt.Printf("Champion lists built (r=%d)\n\n", R)
+	idx.BuildTieredIndex()
 
 	corpusMap := make(map[uint32]string)
 	for _, d := range corpus {
@@ -163,7 +161,7 @@ func main() {
 	fmt.Println("══════════ TF-IDF Ranking ══════════")
 	{
 		bm, _ := idx.Query(index.And(index.Term("lsm"), index.Term("tree")))
-		printRanked("[TF-IDF] top-5 for \"lsm tree\":", idx.RankTFIDF(bm, []string{"lsm", "tree"})[:min5(bm)])
+		printRanked("[TF-IDF] for \"lsm tree\":", idx.RankTFIDF(bm, []string{"lsm", "tree"})[:min5(bm)])
 	}
 	{
 		bm, _ := idx.Query(index.And(index.Term("roaring"), index.Term("bitmap")))
@@ -171,7 +169,15 @@ func main() {
 		if len(r) > 5 {
 			r = r[:5]
 		}
-		printRanked("[TF-IDF] top-5 for \"roaring bitmap\":", r)
+		printRanked("[TF-IDF] for \"roaring bitmap\":", r)
+	}
+	{
+		bm, _ := idx.Query(index.Or(index.Term("lsm"), index.Term("compaction")))
+		r := idx.RankTFIDF(bm, []string{"lsm", "compaction"})
+		if len(r) > 5 {
+			r = r[:5]
+		}
+		printRanked("[TF-IDF] for \"lsm compaction\":", r)
 	}
 
 	// ══ VSM ══════════════════════════════════════════
@@ -182,17 +188,17 @@ func main() {
 		if len(r) > 5 {
 			r = r[:5]
 		}
-		printRanked("[VSM] top-5 for \"lsm compaction\":", r)
+		printRanked("[VSM] for \"lsm compaction\":", r)
 	}
 
 	// ══ Champion Lists ════════════════════════════════
 	fmt.Println("══════════ Champion Lists (inexact top-K) ══════════")
-	printRanked("[Champion] top-3 for \"lsm write\":",
-		idx.ChampionSearch(3, "lsm", "write"))
-	printRanked("[Champion] top-3 for \"roaring bitmap intersection\":",
-		idx.ChampionSearch(3, "roaring", "bitmap", "intersection"))
-	printRanked("[Champion] top-5 for \"write amplification\":",
-		idx.ChampionSearch(5, "write", "amplification"))
+	printRanked("[Champion] top for \"lsm write\":",
+		idx.TieredSearch(3, 5, "lsm", "write"))
+	printRanked("[Champion] top for \"roaring bitmap intersection\":",
+		idx.TieredSearch(3, 5, "roaring", "bitmap", "intersection"))
+	printRanked("[Champion] top for \"write amplification\":",
+		idx.TieredSearch(3, 5, "write", "amplification"))
 }
 
 func min5(bm interface{ GetCardinality() uint64 }) int {
